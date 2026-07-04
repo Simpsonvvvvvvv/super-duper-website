@@ -1,10 +1,482 @@
-<h1>my website!!!!</h1>
-<textarea id="whyareyoureading"></textarea>
-<button onclick="start(document.getelementById(whyareyoureading)">turn number into something</button>
-<display id="the"></display>
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>144FPS Raytraced Car Game</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #050508;
+            font-family: sans-serif;
+        }
+        #game-container {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            max-width: 500px;
+            margin: 0 auto;
+        }
+        canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: #fff;
+            text-shadow: 2px 2px 4px #000;
+            font-size: 20px;
+            pointer-events: none;
+            z-index: 10;
+        }
+        #fps { font-size: 14px; color: #0f0; }
+        #game-over {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #ff3333;
+            font-size: 40px;
+            font-weight: bold;
+            text-shadow: 2px 2px 8px #000;
+            display: none;
+            text-align: center;
+            z-index: 20;
+        }
+        #restart-btn {
+            margin-top: 20px;
+            padding: 10px 20px;
+            font-size: 18px;
+            background: #fff;
+            color: #000;
+            border: none;
+            cursor: pointer;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+        #controls {
+            position: absolute;
+            bottom: 30px;
+            width: 100%;
+            display: flex;
+            justify-content: space-around;
+            padding: 0 20px;
+            box-sizing: border-box;
+            z-index: 10;
+        }
+        .btn {
+            width: 80px;
+            height: 80px;
+            background: rgba(255, 255, 255, 0.2);
+            border: 2px solid #fff;
+            border-radius: 50%;
+            color: #fff;
+            font-size: 30px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            user-select: none;
+            cursor: pointer;
+        }
+        .btn:active { background: rgba(255, 255, 255, 0.5); }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <div id="ui">
+        <div id="score">Score: 0</div>
+        <div id="fps">FPS: --</div>
+    </div>
+
+    <div id="game-over">
+        GAME OVER
+        <br>
+        <button id="restart-btn" onclick="resetGame()">RESTART</button>
+    </div>
+
+    <canvas id="renderCanvas"></canvas>
+
+    <div id="controls">
+        <div class="btn" id="leftBtn">◀</div>
+        <div class="btn" id="rightBtn">▶</div>
+    </div>
+</div>
+
 <script>
-  function start(num) {
-    uh = 100/num*10+100^(num*10)
-    document.write(uh)
-  }
+const canvas = document.getElementById('renderCanvas');
+const gl = canvas.getContext('webgl2');
+
+if (!gl) alert('WebGL 2 не поддерживается!');
+
+const vsSource = `#version 300 es
+in vec2 position;
+void main() {
+    gl_Position = vec4(position, 0.0, 1.0);
+}`;
+
+const MAX_OBS = 5;
+
+const fsSource = `#version 300 es
+precision highp float;
+out vec4 fragColor;
+
+uniform vec2 u_resolution;
+uniform float u_time;
+
+uniform float u_carX;
+uniform float u_roadOffset;
+
+uniform int u_obstacleCount;
+uniform float u_obsX[${MAX_OBS}];
+uniform float u_obsZ[${MAX_OBS}]; 
+uniform vec3 u_obsColor[${MAX_OBS}];
+
+float sdBox(vec3 p, vec3 b) {
+    vec3 q = abs(p) - b;
+    return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
+}
+
+float sdCylinder(vec3 p, vec2 h) {
+    vec2 d = abs(vec2(length(p.xz), p.y)) - h;
+    return min(max(d.x, d.y), 0.0) + length(max(d, 0.0));
+}
+
+vec2 carSDF(vec3 carPos, float carColorMode) {
+    float boundingBox = sdBox(carPos - vec3(0.0, 0.05, 0.0), vec3(0.5, 0.3, 0.85));
+
+    if (boundingBox < 0.2) {
+        float bodyBase = sdBox(carPos, vec3(0.35, 0.12, 0.7));
+        float bodyCabin = sdBox(carPos - vec3(0.0, 0.14, -0.05), vec3(0.28, 0.12, 0.35));
+        float spoiler = sdBox(carPos - vec3(0.0, 0.22, -0.65), vec3(0.38, 0.02, 0.08));
+        float spoilerLegs = sdBox(carPos - vec3(0.3, 0.16, -0.65), vec3(0.02, 0.06, 0.02));
+        spoilerLegs = min(spoilerLegs, sdBox(carPos - vec3(-0.3, 0.16, -0.65), vec3(0.02, 0.06, 0.02)));
+
+        float mainCar = min(min(bodyBase, bodyCabin), min(spoiler, spoilerLegs));
+
+        vec3 wFLLoc = carPos - vec3(-0.38, -0.08, 0.45);
+        float wheelFL = sdCylinder(wFLLoc.zyx, vec2(0.14, 0.08));
+
+        vec3 wFRLoc = carPos - vec3(0.38, -0.08, 0.45);
+        float wheelFR = sdCylinder(wFRLoc.zyx, vec2(0.14, 0.08));
+
+        vec3 wRLLoc = carPos - vec3(-0.38, -0.08, -0.45);
+        float wheelRL = sdCylinder(wRLLoc.zyx, vec2(0.15, 0.09));
+
+        vec3 wRRLoc = carPos - vec3(0.38, -0.08, -0.45);
+        float wheelRR = sdCylinder(wRRLoc.zyx, vec2(0.15, 0.09));
+
+        float allWheels = min(min(wheelFL, wheelFR), min(wheelRL, wheelRR));
+
+        if (mainCar < allWheels) return vec2(mainCar, 10.0 + carColorMode);
+        return vec2(allWheels, 11.0 + carColorMode);
+    } else {
+        if (boundingBox < 0.2) return vec2(boundingBox, 10.0 + carColorMode);
+    }
+
+    return vec2(1e5, 0.0);
+}
+
+vec2 map(vec3 p) {
+    float road = p.y + 1.0;
+    vec2 res = vec2(road, 3.0);
+
+    vec3 playerPos = p - vec3(u_carX, -0.75, -2.5);
+    vec2 hitPlayer = carSDF(playerPos, 0.0);
+    if (hitPlayer.x < res.x) res = vec2(hitPlayer.x, hitPlayer.y);
+
+    for (int i = 0; i < ${MAX_OBS}; i++) {
+        if (i >= u_obstacleCount) break;
+        vec3 obsPos = p - vec3(u_obsX[i], -0.75, u_obsZ[i]);
+        vec2 hitObs = carSDF(obsPos, float(i + 1));
+        if (hitObs.x < res.x) res = vec2(hitObs.x, hitObs.y);
+    }
+
+    return res;
+}
+
+vec3 getNormal(vec3 p) {
+    vec2 e = vec2(0.005, 0.0);
+    return normalize(vec3(
+        map(p + e.xyy).x - map(p - e.xyy).x,
+        map(p + e.yxy).x - map(p - e.yxy).x,
+        map(p + e.yyx).x - map(p - e.yyx).x
+    ));
+}
+
+vec3 getCarColorFromMatId(float matId) {
+    float k = floor(matId - 10.0 + 0.5);
+    if (k < 0.5) return vec3(0.9, 0.05, 0.05);
+
+    float idxF = k - 1.0;
+    if (idxF < 0.5) return u_obsColor[0];
+    if (idxF < 1.5) return u_obsColor[1];
+    if (idxF < 2.5) return u_obsColor[2];
+    if (idxF < 3.5) return u_obsColor[3];
+    return u_obsColor[4];
+}
+
+void main() {
+    vec2 uv = (gl_FragCoord.xy - 0.5 * u_resolution.xy) / u_resolution.y;
+
+    vec3 ro = vec3(0.0, 1.2, -5.5);
+    vec3 rd = normalize(vec3(uv + vec2(0.0, -0.18), 1.0));
+
+    float dO = 0.0;
+    vec2 res = vec2(0.0);
+
+    for(int i = 0; i < 42; i++) {
+        vec3 p = ro + rd * dO;
+        res = map(p);
+        dO += res.x;
+        if(res.x < 0.002 || dO > 25.0) break;
+    }
+
+    vec3 color = vec3(0.05, 0.07, 0.12) - (uv.y * 0.2);
+
+    if(dO < 25.0) {
+        vec3 p = ro + rd * dO;
+        vec3 n = getNormal(p);
+        vec3 lightDir = normalize(vec3(1.5, 4.0, -3.0));
+
+        float diff = max(dot(n, lightDir), 0.3);
+        vec3 matColor = vec3(1.0);
+
+        if(res.y == 1.0) matColor = vec3(0.9, 0.05, 0.05);
+        if(res.y == 2.0) matColor = vec3(0.12, 0.12, 0.14);
+
+        if(res.y >= 9.0) matColor = getCarColorFromMatId(res.y);
+
+        if(res.y == 3.0) {
+            matColor = vec3(0.15, 0.16, 0.18);
+            if (abs(p.x) < 2.0) {
+                float centerLine = step(0.6, sin((p.z + u_roadOffset) * 0.5));
+                if (abs(p.x) < 0.06 && centerLine > 0.0) matColor = vec3(0.9, 0.9, 0.9);
+                if (abs(p.x) > 1.85 && abs(p.x) < 1.92) matColor = vec3(0.9, 0.7, 0.0);
+            } else {
+                matColor = vec3(0.06, 0.12, 0.04);
+            }
+        }
+
+        color = matColor * diff;
+        color = mix(color, vec3(0.05, 0.07, 0.12), 1.0 - exp(-0.01 * dO * dO));
+    }
+
+    fragColor = vec4(color, 1.0);
+}`;
+
+function createShader(gl, type, source) {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    return shader;
+}
+
+const vs = createShader(gl, gl.VERTEX_SHADER, vsSource);
+const fs = createShader(gl, gl.FRAGMENT_SHADER, fsSource);
+
+const program = gl.createProgram();
+gl.attachShader(program, vs);
+gl.attachShader(program, fs);
+gl.linkProgram(program);
+
+const positionAttributeLocation = gl.getAttribLocation(program, 'position');
+const resolutionUniformLocation = gl.getUniformLocation(program, 'u_resolution');
+const timeUniformLocation = gl.getUniformLocation(program, 'u_time');
+const carXUniformLocation = gl.getUniformLocation(program, 'u_carX');
+const roadOffsetUniformLocation = gl.getUniformLocation(program, 'u_roadOffset');
+
+const obstacleCountUniformLocation = gl.getUniformLocation(program, 'u_obstacleCount');
+const obsXUniformLocations = [];
+const obsZUniformLocations = [];
+const obsColorUniformLocations = [];
+for (let i = 0; i < MAX_OBS; i++) {
+    obsXUniformLocations.push(gl.getUniformLocation(program, `u_obsX[${i}]`));
+    obsZUniformLocations.push(gl.getUniformLocation(program, `u_obsZ[${i}]`));
+    obsColorUniformLocations.push(gl.getUniformLocation(program, `u_obsColor[${i}]`));
+}
+
+const positionBuffer = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]), gl.STATIC_DRAW);
+
+const vao = gl.createVertexArray();
+gl.bindVertexArray(vao);
+gl.enableVertexAttribArray(positionAttributeLocation);
+gl.vertexAttribPointer(positionAttributeLocation, 2, gl.FLOAT, false, 0, 0);
+
+// Game state
+let carX = 0.0;
+let roadOffset = 0.0;
+let speed = 25.0;
+let obstacleSpeed = 18.0;
+let score = 0;
+let isGameOver = false;
+
+let lastTime = 0;
+let fpsThresholdTime = 0;
+let frameCount = 0;
+
+let obstacles = [
+    { x: -1.0, z: 40.0, color: '#00ff66' },
+    { x: 1.0, z: 60.0, color: '#ffcc00' },
+    { x: 0.0, z: 80.0, color: '#0099ff' }
+];
+
+const keys = { Left: false, Right: false };
+window.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowLeft' || e.key === 'a') keys.Left = true;
+    if (e.key === 'ArrowRight' || e.key === 'd') keys.Right = true;
+});
+window.addEventListener('keyup', (e) => {
+    if (e.key === 'ArrowLeft' || e.key === 'a') keys.Left = false;
+    if (e.key === 'ArrowRight' || e.key === 'd') keys.Right = false;
+});
+
+const bindTouch = (id, direction) => {
+    const el = document.getElementById(id);
+    el.addEventListener('touchstart', (e) => { e.preventDefault(); keys[direction] = true; });
+    el.addEventListener('touchend', () => { keys[direction] = false; });
+    el.addEventListener('mousedown', () => keys[direction] = true);
+    el.addEventListener('mouseup', () => keys[direction] = false);
+};
+bindTouch('leftBtn', 'Left');
+bindTouch('rightBtn', 'Right');
+
+function resizeCanvas() {
+    const dpr = 0.5;
+    const displayWidth = Math.floor(canvas.clientWidth * dpr);
+    const displayHeight = Math.floor(canvas.clientHeight * dpr);
+    if (canvas.width !== displayWidth || canvas.height !== displayHeight) {
+        canvas.width = displayWidth;
+        canvas.height = displayHeight;
+    }
+}
+
+function hexToRgb01(hex) {
+    const h = hex.replace('#','').trim();
+    const v = parseInt(h, 16);
+    return [((v >> 16) & 255) / 255, ((v >> 8) & 255) / 255, (v & 255) / 255];
+}
+
+function pickRandomColorHex() {
+    const colors = ['#00ff66', '#ffcc00', '#0099ff', '#ff00ff', '#ffffff', '#ff5500', '#00e5ff'];
+    return colors[Math.floor(Math.random() * colors.length)];
+}
+
+window.resetGame = function() {
+    carX = 0.0;
+    roadOffset = 0.0;
+    speed = 25.0;
+    obstacleSpeed = 18.0;
+    score = 0;
+    isGameOver = false;
+
+    document.getElementById('game-over').style.display = 'none';
+    obstacles = [
+        { x: -1.0, z: 40.0, color: pickRandomColorHex() },
+        { x: 1.0, z: 60.0, color: pickRandomColorHex() },
+        { x: 0.0, z: 80.0, color: pickRandomColorHex() }
+    ];
+
+    lastTime = performance.now() * 0.001;
+    fpsThresholdTime = 0;
+    frameCount = 0;
+
+    requestAnimationFrame(update);
+};
+
+function uploadObstacleUniforms() {
+    const count = Math.min(obstacles.length, MAX_OBS);
+    gl.uniform1i(obstacleCountUniformLocation, count);
+
+    for (let i = 0; i < MAX_OBS; i++) {
+        const obs = obstacles[i];
+        if (i < count) {
+            gl.uniform1f(obsXUniformLocations[i], obs.x);
+            gl.uniform1f(obsZUniformLocations[i], obs.z);
+
+            const [r,g,b] = hexToRgb01(obs.color);
+            gl.uniform3f(obsColorUniformLocations[i], r, g, b);
+        } else {
+            gl.uniform1f(obsXUniformLocations[i], 0);
+            gl.uniform1f(obsZUniformLocations[i], 9999);
+            gl.uniform3f(obsColorUniformLocations[i], 0, 0, 0);
+        }
+    }
+}
+
+function update(time) {
+    if (isGameOver) return;
+
+    time *= 0.001;
+    const deltaTime = Math.min(time - lastTime, 0.1);
+    lastTime = time;
+    frameCount++;
+
+    if (time > fpsThresholdTime + 1.0) {
+        document.getElementById('fps').innerText =
+            `FPS: ${Math.round((frameCount * 1000) / (time - fpsThresholdTime) / 1000)}`;
+        frameCount = 0;
+        fpsThresholdTime = time;
+    }
+
+    if (keys.Left) carX -= 3.5 * deltaTime;
+    if (keys.Right) carX += 3.5 * deltaTime;
+    carX = Math.max(Math.min(carX, 1.8), -1.8);
+
+    roadOffset += speed * deltaTime;
+    score += Math.floor(deltaTime * 20);
+    document.getElementById('score').innerText = `Score: ${score}`;
+
+    // FIX: narrow collision gate further (was still early)
+    const hitZCenter = 3.0;
+    const hitZHalf = 0.55;      // total window = 1.1
+    const hitX = 0.50;          // was 0.55
+
+    for (let i = 0; i < obstacles.length; i++) {
+        obstacles[i].z -= obstacleSpeed * deltaTime;
+
+        if (obstacles[i].z < 0.0) {
+            obstacles[i].z = 40.0 + Math.random() * 20.0;
+            obstacles[i].x = (Math.random() - 0.5) * 3.2;
+            obstacles[i].color = pickRandomColorHex();
+        }
+
+        const z = obstacles[i].z;
+        if (z > (hitZCenter - hitZHalf) && z < (hitZCenter + hitZHalf)) {
+            if (Math.abs(obstacles[i].x - carX) < hitX) {
+                isGameOver = true;
+                document.getElementById('game-over').style.display = 'block';
+            }
+        }
+    }
+
+    resizeCanvas();
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.useProgram(program);
+    gl.bindVertexArray(vao);
+
+    gl.uniform2f(resolutionUniformLocation, canvas.width, canvas.height);
+    gl.uniform1f(timeUniformLocation, time);
+    gl.uniform1f(carXUniformLocation, carX);
+    gl.uniform1f(roadOffsetUniformLocation, roadOffset);
+
+    uploadObstacleUniforms();
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    requestAnimationFrame(update);
+}
+
+lastTime = performance.now() * 0.001;
+requestAnimationFrame(update);
 </script>
+</body>
+</html>
